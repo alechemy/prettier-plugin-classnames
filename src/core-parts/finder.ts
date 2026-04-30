@@ -521,6 +521,73 @@ function handleJavaScriptObjectProperty(ctx: CaseHandlerContext) {
       }
     });
   }
+
+  // Detect Angular @Component({ template: `...` }) inline templates and emit
+  // attribute-type nodes for `class="..."` substrings inside the template literal,
+  // so the wrap algorithm processes them like HTML attributes.
+  if (
+    isTypeof(
+      ctx.node,
+      z.object({
+        key: z.union([
+          z.object({ type: z.literal('Identifier'), name: z.string() }),
+          z.object({ type: z.literal('Literal'), value: z.string() }),
+          z.object({ type: z.literal('StringLiteral'), value: z.string() }),
+        ]),
+        value: z.object({
+          type: z.literal('TemplateLiteral'),
+          start: z.number(),
+          end: z.number(),
+          quasis: z.array(
+            z.object({
+              type: z.literal('TemplateElement'),
+              value: z.object({ cooked: z.string() }),
+              tail: z.boolean(),
+            }),
+          ),
+        }),
+      }),
+    )
+  ) {
+    const keyName =
+      'name' in ctx.node.key ? ctx.node.key.name : (ctx.node.key as { value: string }).value;
+
+    if (keyName === 'template' && ctx.node.value.quasis.length === 1) {
+      const templateStart = ctx.node.value.start;
+      const templateEnd = ctx.node.value.end;
+      const bodyStart = templateStart + 1;
+      const bodyEnd = templateEnd - 1;
+      const body = ctx.formattedText.slice(bodyStart, bodyEnd);
+
+      const classAttrRegex = /\bclass\s*=\s*"([^"]*)"/g;
+      let match: RegExpExecArray | null;
+
+      while ((match = classAttrRegex.exec(body)) !== null) {
+        const matchStart = bodyStart + match.index;
+        const matchEnd = matchStart + match[0].length;
+        const openQuotePos = matchStart + match[0].indexOf('"');
+        const closeQuotePos = matchEnd - 1;
+        const classValueRangeStart = openQuotePos;
+        const classValueRangeEnd = closeQuotePos + 1;
+
+        ctx.keywordStartingNodes.push({
+          type: 'NgInlineTemplateClassAttr',
+          start: matchStart,
+          end: matchEnd,
+        });
+
+        const lineIndex = ctx.formattedText.slice(0, openQuotePos).split(EOL).length - 1;
+
+        ctx.classNameNodes.push({
+          type: 'attribute',
+          isTheFirstLineOnTheSameLineAsTheOpeningTag: false,
+          elementName: '',
+          range: [classValueRangeStart, classValueRangeEnd],
+          startLineIndex: lineIndex,
+        });
+      }
+    }
+  }
 }
 
 function handleJavaScriptStringLiteral(ctx: CaseHandlerContext) {
@@ -1941,9 +2008,23 @@ export function findTargetClassNameNodesBasedOnJavaScript(
         break;
       }
       case 'ChainExpression':
+      case 'Decorator':
       case 'ExpressionStatement':
       case 'JSXExpressionContainer': {
         recursiveProps = ['expression'];
+        break;
+      }
+      case 'ClassDeclaration': {
+        recursiveProps = ['decorators', 'body'];
+        break;
+      }
+      case 'ClassBody': {
+        recursiveProps = ['body'];
+        break;
+      }
+      case 'PropertyDefinition':
+      case 'MethodDefinition': {
+        recursiveProps = ['decorators', 'value'];
         break;
       }
       case 'ConditionalExpression':
